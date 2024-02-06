@@ -11,8 +11,9 @@ import (
 
 	"github.com/containers/podman/v2/pkg/ctime"
 	"github.com/eraser-dev/eraser/api/unversioned"
+	"github.com/eraser-dev/eraser/pkg/logger"
 	template "github.com/eraser-dev/eraser/pkg/scanners/template"
-	"gopkg.in/yaml.v2"
+	"k8s.io/apimachinery/pkg/util/yaml"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 )
 
@@ -36,6 +37,10 @@ type Config struct {
 }
 
 func main() {
+	if err := logger.Configure(); err != nil {
+		fmt.Fprintf(os.Stderr, "error setting up logger: %s", err)
+		os.Exit(1)
+	}
 	if config == nil || *config == "" {
 		s := "/config/controller_manager_config.yaml"
 		config = &s
@@ -44,6 +49,7 @@ func main() {
 	c, err := loadConfig(*config)
 	if err != nil {
 		log.Error(err, "unable to read configuration file")
+		os.Exit(1)
 	}
 
 	if c.MaxAge != "" {
@@ -51,6 +57,7 @@ func main() {
 		maxAge, err = time.ParseDuration(c.MaxAge)
 		if err != nil {
 			log.Error(err, "unable to parse duration", "config.MaxAge", c.MaxAge)
+			os.Exit(1)
 		}
 	}
 
@@ -66,7 +73,7 @@ func main() {
 	allImages, err := imageProvider.ReceiveImages()
 	if err != nil {
 		log.Error(err, "unable to retrieve list of images from collector container")
-		return
+		os.Exit(1)
 	}
 
 	// scan images with custom scanner
@@ -75,13 +82,13 @@ func main() {
 	// send images to eraser container
 	if err := imageProvider.SendImages(nonCompliant, failedImages); err != nil {
 		log.Error(err, "unable to send non-compliant images to eraser container")
-		return
+		os.Exit(1)
 	}
 
 	// complete scan
 	if err := imageProvider.Finish(); err != nil {
 		log.Error(err, "unable to complete scanner")
-		return
+		os.Exit(1)
 	}
 }
 
@@ -121,43 +128,49 @@ func scan(allImages []unversioned.Image) ([]unversioned.Image, []unversioned.Ima
 		}
 
 		created := ctime.Created(info)
+		log.Info("image scanned", "image", img, "created_at", created.String(), "image age", time.Since(created).String())
 		if time.Since(created) > maxAge {
 			nonCompliant = append(nonCompliant, img)
 		}
 
 		return nil
 	}); err != nil {
-		log.Error(fmt.Errorf("directory scan failed"), "all images considered failed")
+		log.Error(err, "all images considered failed")
 		return []unversioned.Image{}, allImages
 	}
+
+	log.Info("images", "nonCompliant", nonCompliant, "failed", failedImages)
 
 	return nonCompliant, failedImages
 }
 
 func loadConfig(filename string) (Config, error) {
-	cfg := Config{MaxAge: "7d"}
+	cfg := Config{MaxAge: "168h"}
 
 	b, err := os.ReadFile(filename)
 	if err != nil {
-		log.Error(err, "unable to read eraser config")
+		log.Error(err, "unable to read eraser config", "config", string(b))
 		return cfg, err
 	}
 
+	log.Info("eraserConfig", "config", string(b))
 	var eraserConfig unversioned.EraserConfig
 	err = yaml.Unmarshal(b, &eraserConfig)
 	if err != nil {
-		log.Error(err, "unable to unmarshal eraser config")
+		log.Error(err, "unable to unmarshal eraser config", "config", string(b))
 	}
 
 	scanCfgYaml := eraserConfig.Components.Scanner.Config
+	log.Info("scanner config yaml string", "config", string(*scanCfgYaml))
 	scanCfgBytes := []byte("")
 	if scanCfgYaml != nil {
 		scanCfgBytes = []byte(*scanCfgYaml)
 	}
 
+	log.Info("scanner config", "config", string(scanCfgBytes))
 	err = yaml.Unmarshal(scanCfgBytes, &cfg)
 	if err != nil {
-		log.Error(err, "unable to unmarshal scanner config")
+		log.Error(err, "unable to unmarshal scanner config", "config", string(scanCfgBytes))
 		return cfg, err
 	}
 
